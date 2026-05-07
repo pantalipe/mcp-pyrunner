@@ -3,18 +3,34 @@ mcp-pyrunner — MCP server for executing Python scripts from Claude Desktop.
 
 Tools:
   run_script  — runs a .py file, auto-detecting the nearest venv
-  run_code    — runs an inline Python snippet in a temp file
+  run_code    — runs an inline Python snippet via python -c
 """
 
 import subprocess
 import sys
-import tempfile
 import os
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("mcp-pyrunner")
+
+# ── clean environment ─────────────────────────────────────────────────────────
+
+def _clean_env() -> dict:
+    """
+    Return a sanitised environment for child processes.
+    Strips uv/virtualenv variables that can cause Python subprocesses to hang
+    or behave unexpectedly when spawned from within a uv-managed server.
+    """
+    blocked = {
+        "VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT",
+        "PYTHONPATH", "PYTHONHOME",
+        "UV_PROJECT_ENVIRONMENT", "UV_PYTHON",
+        "PYTHONINSPECT",
+    }
+    return {k: v for k, v in os.environ.items() if k not in blocked}
+
 
 # ── venv resolution ───────────────────────────────────────────────────────────
 
@@ -25,7 +41,7 @@ def find_venv_python(start_path: Path, override: str | None = None) -> str:
     Priority:
       1. override (explicit venv_path from caller)
       2. auto-detect: walk up from start_path looking for venv/Scripts/python.exe
-      3. fallback: sys.executable (Python running this server)
+      3. fallback: sys.executable
     """
     if override:
         candidate = Path(override) / "Scripts" / "python.exe"
@@ -57,6 +73,8 @@ def run(python: str, args: list[str], cwd: str | None = None, timeout: int = 30)
             text=True,
             cwd=cwd,
             timeout=timeout,
+            env=_clean_env(),
+            stdin=subprocess.DEVNULL,
         )
         return {"stdout": result.stdout, "stderr": result.stderr, "exit_code": result.returncode}
     except subprocess.TimeoutExpired:
@@ -113,9 +131,8 @@ def run_code(
     timeout: int = 30,
 ) -> str:
     """
-    Run an inline Python code snippet. Writes the snippet to a temp file
-    and executes it. Accepts an optional working directory for venv
-    auto-detection.
+    Run an inline Python code snippet using 'python -c'. Accepts an optional
+    working directory for venv auto-detection.
 
     Args:
         code: Python source code to execute.
@@ -125,16 +142,7 @@ def run_code(
     """
     cwd = working_dir or str(Path.home())
     python = find_venv_python(Path(cwd), venv_path or None)
-
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as tmp:
-        tmp.write(code)
-        tmp_path = tmp.name
-
-    try:
-        result = run(python, [tmp_path], cwd=cwd, timeout=timeout)
-    finally:
-        os.unlink(tmp_path)
-
+    result = run(python, ["-c", code], cwd=cwd, timeout=timeout)
     return format_output(result, python)
 
 
